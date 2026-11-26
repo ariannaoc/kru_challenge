@@ -27,14 +27,14 @@ export const KRU_SCHEMAS = {
       {
         key: 'nombre',
         label: 'Nombre',
-        type: 'string',
+        type: 'person_name',
         required: true,
         synonyms: ['nombre', 'nombres', 'primer_nombre'],
       },
       {
         key: 'apellido',
         label: 'Apellido',
-        type: 'string',
+        type: 'person_name',
         required: true,
         synonyms: ['apellido', 'apellidos', 'primer_apellido'],
       },

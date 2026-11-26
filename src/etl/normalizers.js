@@ -2,6 +2,7 @@
  * Normalización y validación de tipos para estandarizar los datos al modelo oficial de Kru.
  */
 
+
 export function normalizeHeader(header) {
   if (!header) return '';
   return String(header)
@@ -286,18 +287,52 @@ export function normalizeBonusFrequency(raw) {
   };
 }
 
-export function splitFullName(fullName) {
-  const parts = String(fullName || '')
-    .trim()
-    .split(/\s+/)
-    .filter(Boolean);
+export function normalizePersonName(raw) {
+  if (!raw || String(raw).trim() === '') {
+    return { value: '', valid: false, error: 'Nombre vacío' };
+  }
 
-  if (parts.length === 0) return { nombre: '', apellido: '' };
-  if (parts.length === 1) return { nombre: parts[0], apellido: '' };
-  if (parts.length === 2) return { nombre: parts[0], apellido: parts[1] };
+  const formatted = String(raw)
+    .trim()
+    .replace(/,/g, '')
+    .split(/\s+/)
+    .filter(Boolean)
+    .map((word) => word.charAt(0).toUpperCase() + word.slice(1).toLowerCase())
+    .join(' ');
 
   return {
-    nombre: parts.slice(0, 2).join(' '),
-    apellido: parts.slice(2).join(' '),
+    value: formatted,
+    valid: true,
+    error: null,
   };
+}
+
+export function splitFullName(fullName) {
+  const rawStr = String(fullName || '').trim();
+  if (!rawStr) return { nombre: '', apellido: '' };
+
+  if (rawStr.includes(',')) {
+    const [lastPart, firstPart] = rawStr.split(',').map((s) => s.trim());
+    return {
+      nombre: firstPart ? normalizePersonName(firstPart).value : '',
+      apellido: lastPart ? normalizePersonName(lastPart).value : '',
+    };
+  }
+
+  const parts = rawStr.split(/\s+/).filter(Boolean);
+  if (parts.length === 1) {
+    return { nombre: normalizePersonName(parts[0]).value, apellido: '' };
+  }
+  if (parts.length === 2) {
+    return {
+      nombre: normalizePersonName(parts[0]).value,
+      apellido: normalizePersonName(parts[1]).value,
+    };
+  }
+
+  return {
+    nombre: normalizePersonName(parts.slice(0, 2).join(' ')).value,
+    apellido: normalizePersonName(parts.slice(2).join(' ')).value,
+  };
+  
 }
