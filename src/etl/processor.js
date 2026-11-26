@@ -97,7 +97,6 @@ function buildHeaderMapping(rawHeaders, schema) {
   return { mapping, compositeMapping };
 }
 
-
 function normalizeFieldByType(type, rawValue) {
   const strVal = rawValue === null || rawValue === undefined ? '' : String(rawValue).trim();
 
@@ -142,9 +141,18 @@ function normalizeFieldByType(type, rawValue) {
   }
 }
 
-export function validateAndNormalizeRow(blockId, rawRowObj, rowNumber, fileName) {
+export function validateAndNormalizeRow(
+  blockId,
+  rawRowObj,
+  rowIndex,
+  sourceRowNumber,
+  fileName
+) {
   const schema = KRU_SCHEMAS[blockId];
-  const cleanRow = {};
+  const cleanRow = {
+    _sourceFile: fileName,
+    _sourceRow: sourceRowNumber,
+  };
   const rowErrors = [];
   const rowWarnings = [];
 
@@ -157,7 +165,8 @@ export function validateAndNormalizeRow(blockId, rawRowObj, rowNumber, fileName)
       rowErrors.push({
         file: fileName,
         block: schema.label,
-        row: rowNumber,
+        row: sourceRowNumber,
+        rowIndex,
         field: col.key,
         value: '',
         reason: `Campo obligatorio "${col.label}" vacío`,
@@ -177,7 +186,8 @@ export function validateAndNormalizeRow(blockId, rawRowObj, rowNumber, fileName)
       rowErrors.push({
         file: fileName,
         block: schema.label,
-        row: rowNumber,
+        row: sourceRowNumber,
+        rowIndex,
         field: col.key,
         value: strVal,
         reason: res.error,
@@ -186,7 +196,8 @@ export function validateAndNormalizeRow(blockId, rawRowObj, rowNumber, fileName)
       rowErrors.push({
         file: fileName,
         block: schema.label,
-        row: rowNumber,
+        row: sourceRowNumber,
+        rowIndex,
         field: col.key,
         value: strVal,
         reason: `El monto en "${col.label}" no puede ser negativo (${res.value})`,
@@ -203,7 +214,8 @@ export function validateAndNormalizeRow(blockId, rawRowObj, rowNumber, fileName)
       rowWarnings.push({
         file: fileName,
         block: schema.label,
-        row: rowNumber,
+        row: sourceRowNumber,
+        rowIndex,
         field: 'neto',
         value: cleanRow.neto,
         reason: `El salario neto (${cleanRow.neto}) es mayor que el bruto (${cleanRow.bruto})`,
@@ -220,7 +232,8 @@ export function validateAndNormalizeRow(blockId, rawRowObj, rowNumber, fileName)
       rowWarnings.push({
         file: fileName,
         block: schema.label,
-        row: rowNumber,
+        row: sourceRowNumber,
+        rowIndex,
         field: 'dias_tomados',
         value: cleanRow.dias_tomados,
         reason: `Días tomados (${cleanRow.dias_tomados}) excede los días correspondientes (${cleanRow.dias_correspondientes})`,
@@ -232,7 +245,7 @@ export function validateAndNormalizeRow(blockId, rawRowObj, rowNumber, fileName)
 }
 
 export function computeBlockStatus(blockData) {
-  if (!blockData || !blockData.fileName || blockData.rows.length === 0) {
+  if (!blockData || blockData.sourceFiles.length === 0 || blockData.rows.length === 0) {
     return 'FALTANTE';
   }
   const hasBlockingErrors = blockData.errors.length > 0;
@@ -254,6 +267,7 @@ export async function processCsvBatch(fileList) {
       label: b.label,
       status: 'FALTANTE',
       fileName: null,
+      sourceFiles: [],
       rows: [],
       errors: [],
       warnings: [],
@@ -272,18 +286,18 @@ export async function processCsvBatch(fileList) {
     }
 
     const schema = KRU_SCHEMAS[blockId];
+    const targetBlock = blocks[blockId];
     const { mapping, compositeMapping } = buildHeaderMapping(parsed.rawHeaders, schema);
 
-    const missingOptional = schema.columns
+    const fileMissingOptional = schema.columns
       .filter((col) => !col.required && !mapping[col.key])
       .map((col) => col.label);
 
-    const rows = [];
-    const errors = [];
-    const warnings = [];
+    const startIndex = targetBlock.rows.length;
 
     parsed.rawRows.forEach((rawCsvRow, idx) => {
-      const rowNumber = idx + 2;
+      const sourceRowNumber = idx + 2;
+      const rowIndex = startIndex + idx;
       const mappedObj = {};
 
       for (const col of schema.columns) {
@@ -305,25 +319,21 @@ export async function processCsvBatch(fileList) {
       const { cleanRow, rowErrors, rowWarnings } = validateAndNormalizeRow(
         blockId,
         mappedObj,
-        rowNumber,
+        rowIndex,
+        sourceRowNumber,
         parsed.fileName
       );
 
-      rows.push(cleanRow);
-      errors.push(...rowErrors);
-      warnings.push(...rowWarnings);
+      targetBlock.rows.push(cleanRow);
+      targetBlock.errors.push(...rowErrors);
+      targetBlock.warnings.push(...rowWarnings);
     });
 
-    blocks[blockId] = {
-      id: blockId,
-      label: schema.label,
-      fileName: parsed.fileName,
-      rows,
-      errors,
-      warnings,
-      missingOptional,
-      status: 'FALTANTE',
-    };
+    targetBlock.sourceFiles.push(parsed.fileName);
+    targetBlock.fileName = targetBlock.sourceFiles.join(', ');
+    targetBlock.missingOptional = Array.from(
+      new Set([...targetBlock.missingOptional, ...fileMissingOptional])
+    );
   }
 
   const validEmployeeDocs = new Set(
@@ -341,12 +351,14 @@ export async function processCsvBatch(fileList) {
       const doc = row.documento;
       if (doc && blocks.empleados.rows.length > 0 && !validEmployeeDocs.has(doc)) {
         blockData.warnings.push({
-          file: blockData.fileName,
+          file: row._sourceFile || blockData.fileName,
           block: blockData.label,
-          row: idx + 2,
+          row: row._sourceRow || idx + 2,
+          rowIndex: idx,
           field: 'documento',
           value: doc,
-          reason: `Registro huérfano: el documento ${doc} no existe en la maestro de Empleados`,
+          reason: `El documento ${doc} no existe o no está relacionado con ningún empleado actual`,
+          isUnlinkedDoc: true,
         });
       }
     });
