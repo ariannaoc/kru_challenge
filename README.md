@@ -26,3 +26,9 @@
    ```
 
 3. Abrir en el navegador la URL indicada en consola y arrastrar o seleccionar los archivos `.csv` del cliente
+
+## Entregables y documentación 
+
+- **Bitácora de decisiones y Registro de uso de IA:** [Ver documento en Google Docs](https://docs.google.com/document/d/1fU9Pgcwr9_nItwowhwnlPwyn16I0N6XF1eMyzP-5cRA/edit?usp=sharing)
+
+- **Video de presentación:** [Ver en Google Drive](https://drive.google.com/file/d/1TwKW5ctvUeWiwHHBoQ4Y-Bwhnworriq6/view?usp=sharing)
