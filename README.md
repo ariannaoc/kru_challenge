@@ -1,5 +1,5 @@
 # Kru Challenge — Normalización de Datos
-### Herramienta *client-side* para estandarización y validación de archivos `.csv` de RRHH y nómina hacia el modelo de datos de Kru
+### Herramienta *client-side* para estandarización y validación de archivos `.csv` de clientes.
 
 **Autora:** Arianna Olivares  
 **Stack:** React + Vite
