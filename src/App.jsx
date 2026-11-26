@@ -1,34 +1,636 @@
-import { useState } from 'react'
+import { useState, useRef } from 'react';
+import {
+  UploadCloud,
+  FileSpreadsheet,
+  X,
+  CheckCircle2,
+  AlertTriangle,
+  XCircle,
+  Download,
+  RefreshCw,
+  Search,
+  Play,
+  FileWarning,
+} from 'lucide-react';
+import { KRU_BLOCKS, KRU_SCHEMAS } from './etl/schema';
+import {
+  processCsvBatch,
+  validateAndNormalizeRow,
+  computeBlockStatus,
+} from './etl/processor';
+import { exportCleanedBatchZip } from './etl/exporter';
 
+export default function App() {
+  const [stagedFiles, setStagedFiles] = useState([]);
+  const [batchData, setBatchData] = useState(null);
+  const [activeBlockId, setActiveBlockId] = useState('empleados');
+  const [isDragging, setIsDragging] = useState(false);
+  const [isProcessing, setIsProcessing] = useState(false);
+  const [searchTerm, setSearchTerm] = useState('');
 
-function App() {
-  const [count, setCount] = useState(0)
+  const fileInputRef = useRef(null);
+
+  const handleFilesSelected = (fileList) => {
+    const csvFiles = Array.from(fileList).filter((file) =>
+      file.name.toLowerCase().endsWith('.csv')
+    );
+
+    if (csvFiles.length === 0) return;
+
+    setStagedFiles((prev) => {
+      const existingNames = new Set(prev.map((f) => f.name));
+      const uniqueNew = csvFiles.filter((f) => !existingNames.has(f.name));
+      return [...prev, ...uniqueNew];
+    });
+  };
+
+  const removeStagedFile = (fileName) => {
+    setStagedFiles((prev) => prev.filter((f) => f.name !== fileName));
+  };
+
+  const handleRunEtl = async () => {
+    if (stagedFiles.length === 0) return;
+    setIsProcessing(true);
+
+    try {
+      const result = await processCsvBatch(stagedFiles);
+      setBatchData(result);
+
+      const firstLoaded = KRU_BLOCKS.find(
+        (b) => result.blocks[b.id]?.rows?.length > 0
+      );
+      if (firstLoaded) {
+        setActiveBlockId(firstLoaded.id);
+      }
+    } catch (error) {
+      console.error('Error procesando lote CSV:', error);
+      alert('Ocurrió un error al leer los archivos CSV.');
+    } finally {
+      setIsProcessing(false);
+    }
+  };
+
+  const handleCellChange = (blockId, rowIndex, fieldKey, newValue) => {
+    setBatchData((prev) => {
+      if (!prev) return prev;
+      const block = prev.blocks[blockId];
+      const updatedRows = [...block.rows];
+      updatedRows[rowIndex] = {
+        ...updatedRows[rowIndex],
+        [fieldKey]: newValue,
+      };
+
+      return {
+        ...prev,
+        blocks: {
+          ...prev.blocks,
+          [blockId]: {
+            ...block,
+            rows: updatedRows,
+          },
+        },
+      };
+    });
+  };
+
+  const handleCellBlur = (blockId) => {
+    setBatchData((prev) => {
+      if (!prev) return prev;
+      const updatedBlocks = { ...prev.blocks };
+      const targetBlock = updatedBlocks[blockId];
+
+      const newRows = [];
+      const newErrors = [];
+      const newWarnings = [];
+
+      targetBlock.rows.forEach((rowObj, idx) => {
+        const rowNumber = idx + 2;
+        const { cleanRow, rowErrors, rowWarnings } = validateAndNormalizeRow(
+          blockId,
+          rowObj,
+          rowNumber,
+          targetBlock.fileName
+        );
+        newRows.push(cleanRow);
+        newErrors.push(...rowErrors);
+        newWarnings.push(...rowWarnings);
+      });
+
+      updatedBlocks[blockId] = {
+        ...targetBlock,
+        rows: newRows,
+        errors: newErrors,
+        warnings: newWarnings,
+      };
+
+      const validEmployeeDocs = new Set(
+        updatedBlocks.empleados.rows
+          .map((emp) => emp.documento)
+          .filter((doc) => doc && /^[VE]\d{5,10}$/.test(doc))
+      );
+
+      for (const b of KRU_BLOCKS) {
+        if (b.id === 'empleados') continue;
+        const blk = updatedBlocks[b.id];
+        if (blk.rows.length === 0) continue;
+
+        const nonOrphanWarnings = blk.warnings.filter(
+          (w) => !w.reason.startsWith('Registro huérfano:')
+        );
+
+        blk.rows.forEach((row, idx) => {
+          const doc = row.documento;
+          if (
+            doc &&
+            updatedBlocks.empleados.rows.length > 0 &&
+            !validEmployeeDocs.has(doc)
+          ) {
+            nonOrphanWarnings.push({
+              file: blk.fileName,
+              block: blk.label,
+              row: idx + 2,
+              field: 'documento',
+              value: doc,
+              reason: `Registro huérfano: el documento ${doc} no existe en la maestro de Empleados`,
+            });
+          }
+        });
+
+        updatedBlocks[b.id] = {
+          ...blk,
+          warnings: nonOrphanWarnings,
+        };
+      }
+
+      let totalRows = 0;
+      let errorCount = 0;
+      let warningCount = 0;
+
+      for (const b of KRU_BLOCKS) {
+        updatedBlocks[b.id].status = computeBlockStatus(updatedBlocks[b.id]);
+        totalRows += updatedBlocks[b.id].rows.length;
+        errorCount += updatedBlocks[b.id].errors.length;
+        warningCount += updatedBlocks[b.id].warnings.length;
+      }
+
+      return {
+        ...prev,
+        blocks: updatedBlocks,
+        summary: {
+          ...prev.summary,
+          totalRows,
+          errorCount,
+          warningCount,
+        },
+      };
+    });
+  };
+
+  const handleReset = () => {
+    setBatchData(null);
+    setStagedFiles([]);
+    setSearchTerm('');
+    setActiveBlockId('empleados');
+    if (fileInputRef.current) {
+      fileInputRef.current.value = '';
+    }
+  };
+
+  const renderStatusBadge = (status) => {
+    switch (status) {
+      case 'COMPLETO':
+        return (
+          <span className="inline-flex items-center gap-1 rounded-full bg-emerald-50 px-2.5 py-0.5 text-xs font-medium text-emerald-700 ring-1 ring-inset ring-emerald-600/20">
+            <CheckCircle2 className="h-3.5 w-3.5" />
+            Completo
+          </span>
+        );
+      case 'PARCIAL':
+        return (
+          <span className="inline-flex items-center gap-1 rounded-full bg-amber-50 px-2.5 py-0.5 text-xs font-medium text-amber-700 ring-1 ring-inset ring-amber-600/20">
+            <AlertTriangle className="h-3.5 w-3.5" />
+            Parcial
+          </span>
+        );
+      default:
+        return (
+          <span className="inline-flex items-center gap-1 rounded-full bg-slate-100 px-2.5 py-0.5 text-xs font-medium text-slate-600 ring-1 ring-inset ring-slate-500/20">
+            <XCircle className="h-3.5 w-3.5 text-slate-400" />
+            Faltante
+          </span>
+        );
+    }
+  };
+
+  const currentBlockData = batchData?.blocks?.[activeBlockId];
+  const currentSchema = KRU_SCHEMAS[activeBlockId];
+
+  const errorCellKeys = new Set(
+    (currentBlockData?.errors || []).map((err) => `${err.row}-${err.field}`)
+  );
+
+  const indexedFilteredRows = (currentBlockData?.rows || [])
+    .map((row, originalIdx) => ({ row, originalIdx }))
+    .filter(({ row }) => {
+      if (!searchTerm.trim()) return true;
+      const query = searchTerm.toLowerCase();
+      return Object.values(row).some((val) =>
+        String(val ?? '').toLowerCase().includes(query)
+      );
+    });
 
   return (
-    <>
-      <section id="center">
-        <div className="hero">
-          <img src={heroImg} className="base" width="170" height="179" alt="" />
-          <img src={reactLogo} className="framework" alt="React logo" />
-          <img src={viteLogo} className="vite" alt="Vite logo" />
-        </div>
-        <div>
-          <h1>Get started</h1>
-          <p>
-            Edit <code>src/App.jsx</code> and save to test <code>HMR</code>
-          </p>
-        </div>
-        <button
-          type="button"
-          className="counter"
-          onClick={() => setCount((count) => count + 1)}
-        >
-          Count is {count}
-        </button>
-      </section>
-      
-    </>
-  )
-}
+    <div className="min-h-screen bg-slate-50 text-slate-900 flex flex-col">
+      {!batchData ? (
+        /* PANTALLA INICIAL DRAG & DROP */
+        <main className="flex-1 flex flex-col items-center justify-center p-6">
+          <div className="w-full max-w-xl">
+            <div className="text-center mb-8">
+              <h1 className="text-3xl font-bold tracking-tight text-blue-950">
+                Kru Challenge
+              </h1>
+              <p className="text-sm text-slate-500 mt-1.5">
+                Arrastra los archivos CSV del cliente para normalizar y auditar
+              </p>
+            </div>
 
-export default App
+            <div
+              onDragOver={(e) => {
+                e.preventDefault();
+                setIsDragging(true);
+              }}
+              onDragLeave={(e) => {
+                e.preventDefault();
+                setIsDragging(false);
+              }}
+              onDrop={(e) => {
+                e.preventDefault();
+                setIsDragging(false);
+                handleFilesSelected(e.dataTransfer.files);
+              }}
+              onClick={() => fileInputRef.current?.click()}
+              className={`border-2 border-dashed rounded-2xl p-12 text-center transition-all cursor-pointer bg-white shadow-sm ${
+                isDragging
+                  ? 'border-blue-700 bg-blue-50/60 scale-[1.01]'
+                  : 'border-blue-200 hover:border-blue-600 hover:bg-blue-50/30'
+              }`}
+            >
+              <input
+                ref={fileInputRef}
+                type="file"
+                accept=".csv"
+                multiple
+                className="hidden"
+                onChange={(e) => {
+                  handleFilesSelected(e.target.files);
+                  e.target.value = '';
+                }}
+              />
+
+              <div className="mx-auto w-12 h-12 rounded-full bg-blue-50 text-blue-700 flex items-center justify-center mb-4">
+                <UploadCloud className="h-6 w-6" />
+              </div>
+
+              <p className="text-base font-medium text-slate-800">
+                Arrastra tus archivos CSV aquí
+              </p>
+              <p className="text-xs text-slate-500 mt-1">
+                o haz clic para seleccionarlos desde tu computador
+              </p>
+            </div>
+
+            {stagedFiles.length > 0 && (
+              <div className="mt-6 bg-white border border-slate-200 rounded-xl p-4 shadow-sm">
+                <div className="flex items-center justify-between mb-3">
+                  <span className="text-xs font-semibold uppercase tracking-wider text-slate-500">
+                    Archivos listos ({stagedFiles.length})
+                  </span>
+                  <button
+                    onClick={() => setStagedFiles([])}
+                    className="text-xs text-slate-400 hover:text-rose-600 cursor-pointer"
+                  >
+                    Limpiar todo
+                  </button>
+                </div>
+
+                <ul className="divide-y divide-slate-100 mb-4">
+                  {stagedFiles.map((file) => (
+                    <li
+                      key={file.name}
+                      className="py-2.5 flex items-center justify-between text-sm"
+                    >
+                      <div className="flex items-center gap-2.5 truncate">
+                        <FileSpreadsheet className="h-4 w-4 text-blue-700 shrink-0" />
+                        <span className="font-medium text-slate-700 truncate">
+                          {file.name}
+                        </span>
+                        <span className="text-xs text-slate-400">
+                          ({(file.size / 1024).toFixed(1)} KB)
+                        </span>
+                      </div>
+
+                      <button
+                        onClick={() => removeStagedFile(file.name)}
+                        className="text-slate-400 hover:text-rose-600 p-1 cursor-pointer"
+                        title="Quitar archivo"
+                      >
+                        <X className="h-4 w-4" />
+                      </button>
+                    </li>
+                  ))}
+                </ul>
+
+                <button
+                  onClick={handleRunEtl}
+                  disabled={isProcessing}
+                  className="w-full py-2.5 px-4 bg-blue-800 hover:bg-blue-900 disabled:bg-blue-400 text-white text-sm font-medium rounded-lg shadow-sm flex items-center justify-center gap-2 transition-colors cursor-pointer"
+                >
+                  <Play className="h-4 w-4" />
+                  {isProcessing ? 'Normalizando datos...' : 'Procesar y normalizar lote'}
+                </button>
+              </div>
+            )}
+          </div>
+        </main>
+      ) : (
+        /* DASHBOARD DE AUDITORÍA */
+        <main className="flex-1 max-w-7xl w-full mx-auto px-4 sm:px-6 lg:px-8 py-8 space-y-6">
+          <div className="flex flex-wrap items-center justify-between gap-4">
+            <div>
+              <h1 className="text-2xl font-bold text-blue-950">Kru Challenge</h1>
+              <p className="text-xs text-slate-500">
+                Auditoría y normalización de registros
+              </p>
+            </div>
+
+            <div className="flex items-center gap-2.5">
+              <button
+                onClick={handleReset}
+                className="inline-flex items-center gap-1.5 px-3 py-2 text-xs font-medium text-slate-700 bg-white border border-slate-300 rounded-lg hover:bg-slate-50 transition-colors cursor-pointer"
+              >
+                <RefreshCw className="h-3.5 w-3.5" />
+                Nuevo cliente
+              </button>
+              <button
+                onClick={() => exportCleanedBatchZip(batchData)}
+                className="inline-flex items-center gap-1.5 px-4 py-2 text-xs font-medium text-white bg-blue-800 rounded-lg hover:bg-blue-900 shadow-sm transition-colors cursor-pointer"
+              >
+                <Download className="h-3.5 w-3.5" />
+                Exportar ZIP
+              </button>
+            </div>
+          </div>
+
+          {batchData.unrecognizedFiles?.length > 0 && (
+            <div className="bg-amber-50 border border-amber-200 rounded-xl p-4 flex items-start gap-3 text-sm text-amber-900">
+              <FileWarning className="h-5 w-5 text-amber-600 shrink-0 mt-0.5" />
+              <div>
+                <p className="font-semibold">
+                  Archivos no reconocidos por el modelo de Kru:
+                </p>
+                <p className="text-xs text-amber-800 mt-0.5">
+                  {batchData.unrecognizedFiles.join(', ')} — Verifica que contengan
+                  columnas estándar (documento, monto, fecha, etc.).
+                </p>
+              </div>
+            </div>
+          )}
+
+          <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+            <div className="bg-white border border-slate-200 rounded-xl p-3.5 shadow-sm">
+              <p className="text-xs text-slate-500">Archivos</p>
+              <p className="text-xl font-bold text-blue-950 mt-0.5">
+                {batchData.summary.totalFiles - (batchData.unrecognizedFiles?.length || 0)}
+              </p>
+            </div>
+            <div className="bg-white border border-slate-200 rounded-xl p-3.5 shadow-sm">
+              <p className="text-xs text-slate-500">Registros procesados</p>
+              <p className="text-xl font-bold text-blue-950 mt-0.5">
+                {batchData.summary.totalRows}
+              </p>
+            </div>
+            <div className="bg-white border border-slate-200 rounded-xl p-3.5 shadow-sm">
+              <p className="text-xs text-slate-500">Errores bloqueantes</p>
+              <p className="text-xl font-bold text-rose-600 mt-0.5">
+                {batchData.summary.errorCount}
+              </p>
+            </div>
+            <div className="bg-white border border-slate-200 rounded-xl p-3.5 shadow-sm">
+              <p className="text-xs text-slate-500">Alertas</p>
+              <p className="text-xl font-bold text-amber-600 mt-0.5">
+                {batchData.summary.warningCount}
+              </p>
+            </div>
+          </div>
+
+          {/* Checklist de estados */}
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-3">
+            {KRU_BLOCKS.map((block) => {
+              const info = batchData.blocks[block.id];
+              const isSelected = activeBlockId === block.id;
+              return (
+                <button
+                  key={block.id}
+                  onClick={() => setActiveBlockId(block.id)}
+                  className={`text-left p-4 rounded-xl border transition-all cursor-pointer ${
+                    isSelected
+                      ? 'bg-white border-blue-700 ring-2 ring-blue-700/15 shadow-sm'
+                      : 'bg-white border-slate-200 hover:border-blue-300'
+                  }`}
+                >
+                  <div className="flex items-center justify-between gap-2 mb-2">
+                    <span className="text-xs font-semibold text-slate-800 truncate">
+                      {block.label}
+                    </span>
+                  </div>
+                  <div className="mb-2">{renderStatusBadge(info?.status)}</div>
+                  <p className="text-[11px] text-slate-500 truncate">
+                    {info?.fileName
+                      ? `${info.fileName} (${info.rows.length} filas)`
+                      : 'Sin archivo asociado'}
+                  </p>
+                </button>
+              );
+            })}
+          </div>
+
+          <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+            {/* Tabla de Datos */}
+            <div className="lg:col-span-2 bg-white border border-slate-200 rounded-xl shadow-sm flex flex-col overflow-hidden">
+              <div className="p-4 border-b border-slate-200 flex flex-wrap items-center justify-between gap-3">
+                <div>
+                  <h3 className="text-sm font-semibold text-blue-950">
+                    {currentSchema.label}
+                  </h3>
+                  <p className="text-xs text-slate-500">
+                    Haz clic en cualquier celda para editar y sal del campo para re-validar
+                  </p>
+                </div>
+
+                <div className="relative">
+                  <Search className="h-4 w-4 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2" />
+                  <input
+                    type="text"
+                    value={searchTerm}
+                    onChange={(e) => setSearchTerm(e.target.value)}
+                    placeholder="Filtrar registros..."
+                    className="pl-9 pr-3 py-1.5 text-xs border border-slate-300 rounded-lg focus:outline-none focus:border-blue-600"
+                  />
+                </div>
+              </div>
+
+              {indexedFilteredRows.length > 0 ? (
+                <div className="overflow-x-auto">
+                  <table className="w-full text-left border-collapse">
+                    <thead>
+                      <tr className="bg-slate-50 border-b border-slate-200">
+                        <th className="py-2.5 px-3 text-[11px] font-semibold text-slate-500 uppercase">
+                          Fila
+                        </th>
+                        {currentSchema.columns.map((col) => (
+                          <th
+                            key={col.key}
+                            className="py-2.5 px-3 text-[11px] font-semibold text-slate-600 uppercase whitespace-nowrap"
+                          >
+                            {col.label}
+                            {!col.required && (
+                              <span className="ml-1 text-[10px] font-normal text-slate-400">
+                                (opc)
+                              </span>
+                            )}
+                          </th>
+                        ))}
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-slate-100 text-xs">
+                      {indexedFilteredRows.map(({ row, originalIdx }) => {
+                        const csvRowNumber = originalIdx + 2;
+                        return (
+                          <tr key={originalIdx} className="hover:bg-slate-50/80">
+                            <td className="py-2 px-3 text-slate-400 font-mono">
+                              {csvRowNumber}
+                            </td>
+                            {currentSchema.columns.map((col) => {
+                              const hasCellError = errorCellKeys.has(
+                                `${csvRowNumber}-${col.key}`
+                              );
+                              return (
+                                <td key={col.key} className="py-1.5 px-2">
+                                  <input
+                                    type="text"
+                                    value={row[col.key] ?? ''}
+                                    onChange={(e) =>
+                                      handleCellChange(
+                                        activeBlockId,
+                                        originalIdx,
+                                        col.key,
+                                        e.target.value
+                                      )
+                                    }
+                                    onBlur={() => handleCellBlur(activeBlockId)}
+                                    className={`w-full min-w-[115px] px-2 py-1 rounded border focus:outline-none text-slate-800 ${
+                                      hasCellError
+                                        ? 'bg-rose-50 border-rose-400 text-rose-900 focus:border-rose-600'
+                                        : 'border-transparent hover:border-slate-300 focus:border-blue-600 focus:bg-white bg-transparent'
+                                    }`}
+                                  />
+                                </td>
+                              );
+                            })}
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+              ) : (
+                <div className="p-12 text-center text-sm text-slate-500">
+                  {currentBlockData?.status === 'FALTANTE'
+                    ? 'No se cargó ningún archivo correspondiente a este bloque.'
+                    : 'No hay filas para mostrar con el filtro actual.'}
+                </div>
+              )}
+            </div>
+
+            {/* Bandeja Lateral de Incidencias */}
+            <div className="bg-white border border-slate-200 rounded-xl shadow-sm p-4 flex flex-col gap-4">
+              <div>
+                <h3 className="text-sm font-semibold text-blue-950">
+                  Auditoría de Incidencias
+                </h3>
+                <p className="text-xs text-slate-500">
+                  Detalle por archivo, fila y campo
+                </p>
+              </div>
+
+              {currentBlockData?.missingOptional?.length > 0 && (
+                <div className="p-2.5 rounded-lg bg-blue-50/60 border border-blue-200 text-xs text-blue-950">
+                  <span className="font-semibold">Columnas opcionales ausentes:</span>{' '}
+                  {currentBlockData.missingOptional.join(', ')}
+                </div>
+              )}
+
+              {/* Errores */}
+              <div>
+                <h4 className="text-xs font-semibold text-rose-700 uppercase tracking-wider mb-2 flex items-center justify-between">
+                  <span>Errores de validación</span>
+                  <span className="bg-rose-100 text-rose-800 px-2 py-0.5 rounded-full text-[11px]">
+                    {currentBlockData?.errors?.length || 0}
+                  </span>
+                </h4>
+                {currentBlockData?.errors?.length > 0 ? (
+                  <ul className="space-y-2 max-h-60 overflow-y-auto">
+                    {currentBlockData.errors.map((err, i) => (
+                      <li
+                        key={i}
+                        className="p-2.5 rounded-lg bg-rose-50 border border-rose-200 text-xs text-rose-900"
+                      >
+                        <div className="font-semibold">
+                          Fila {err.row} • Campo: {err.field}
+                        </div>
+                        <div className="text-rose-700 mt-0.5">{err.reason}</div>
+                      </li>
+                    ))}
+                  </ul>
+                ) : (
+                  <p className="text-xs text-slate-400 bg-slate-50 p-3 rounded-lg border border-slate-100">
+                    Sin errores de validación en este bloque.
+                  </p>
+                )}
+              </div>
+
+              {/* Alertas */}
+              <div>
+                <h4 className="text-xs font-semibold text-amber-700 uppercase tracking-wider mb-2 flex items-center justify-between">
+                  <span>Alertas</span>
+                  <span className="bg-amber-100 text-amber-800 px-2 py-0.5 rounded-full text-[11px]">
+                    {currentBlockData?.warnings?.length || 0}
+                  </span>
+                </h4>
+                {currentBlockData?.warnings?.length > 0 ? (
+                  <ul className="space-y-2 max-h-60 overflow-y-auto">
+                    {currentBlockData.warnings.map((warn, i) => (
+                      <li
+                        key={i}
+                        className="p-2.5 rounded-lg bg-amber-50 border border-amber-200 text-xs text-amber-900"
+                      >
+                        <div className="font-semibold">
+                          Fila {warn.row} • {warn.field}
+                        </div>
+                        <div className="text-amber-700 mt-0.5">{warn.reason}</div>
+                      </li>
+                    ))}
+                  </ul>
+                ) : (
+                  <p className="text-xs text-slate-400 bg-slate-50 p-3 rounded-lg border border-slate-100">
+                    Sin alertas pendientes.
+                  </p>
+                )}
+              </div>
+            </div>
+          </div>
+        </main>
+      )}
+    </div>
+  );
+}
