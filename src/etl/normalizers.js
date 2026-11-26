@@ -2,7 +2,6 @@
  * Normalización y validación de tipos para estandarizar los datos al modelo oficial de Kru.
  */
 
-
 export function normalizeHeader(header) {
   if (!header) return '';
   return String(header)
@@ -164,7 +163,7 @@ export function normalizePeriod(raw) {
 
   const str = String(raw).trim().toLowerCase();
 
-  const ymMatch = str.match(/^(\d{4})[-/](\d{1,2})$/);
+  const ymMatch = str.match(/^(\d{4})[-/.](\d{1,2})$/);
   if (ymMatch) {
     const year = ymMatch[1];
     const month = Number(ymMatch[2]);
@@ -173,7 +172,7 @@ export function normalizePeriod(raw) {
     }
   }
 
-  const myMatch = str.match(/^(\d{1,2})[-/](\d{4})$/);
+  const myMatch = str.match(/^(\d{1,2})[-/.](\d{4})$/);
   if (myMatch) {
     const month = Number(myMatch[1]);
     const year = myMatch[2];
@@ -188,6 +187,22 @@ export function normalizePeriod(raw) {
       value: `${textMatch[2]}-${MONTHS_ES[textMatch[1]]}`,
       valid: true,
       error: null,
+    };
+  }
+
+  if (/^\d{1,4}[-/.]\d{1,2}[-/.]\d{1,4}$/.test(str)) {
+    const fullDate = normalizeDate(str);
+    if (fullDate.valid) {
+      return {
+        value: fullDate.value.slice(0, 7),
+        valid: true,
+        error: null,
+      };
+    }
+    return {
+      value: raw,
+      valid: false,
+      error: fullDate.error,
     };
   }
 
@@ -214,7 +229,7 @@ export function normalizeCurrency(raw) {
     return { value: 'EUR', valid: true, error: null };
   }
 
-  if (/^[A-Z]{3}$/.test(clean)) {
+  if (/^[A-Z0-9]{2,10}$/.test(clean)) {
     return { value: clean, valid: true, error: null };
   }
 
@@ -334,5 +349,4 @@ export function splitFullName(fullName) {
     nombre: normalizePersonName(parts.slice(0, 2).join(' ')).value,
     apellido: normalizePersonName(parts.slice(2).join(' ')).value,
   };
-  
 }

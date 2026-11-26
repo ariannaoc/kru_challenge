@@ -9,6 +9,7 @@ import {
   normalizeCurrency,
   normalizePayFrequency,
   normalizeBonusFrequency,
+  normalizePersonName,
   splitFullName,
 } from './normalizers';
 
@@ -115,6 +116,8 @@ function normalizeFieldByType(type, rawValue) {
       return normalizePayFrequency(strVal);
     case 'bonus_frequency':
       return normalizeBonusFrequency(strVal);
+    case 'person_name':
+      return normalizePersonName(strVal);
     case 'email': {
       if (!strVal) return { value: '', valid: true, error: null };
       const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
@@ -244,6 +247,86 @@ export function validateAndNormalizeRow(
   return { cleanRow, rowErrors, rowWarnings };
 }
 
+export function areEmployeeRowsExactMatch(rowA, rowB) {
+  const cols = KRU_SCHEMAS.empleados.columns;
+  return cols.every((col) => {
+    const valA = String(rowA[col.key] ?? '').trim();
+    const valB = String(rowB[col.key] ?? '').trim();
+    return valA === valB;
+  });
+}
+
+export function applyCrossRowValidations(blocks) {
+  const docOccurrences = new Map();
+
+  blocks.empleados.warnings = blocks.empleados.warnings.filter(
+    (w) => !w.isDuplicateDoc
+  );
+
+  blocks.empleados.rows.forEach((emp, idx) => {
+    const doc = emp.documento;
+    if (doc && /^[VE]\d{5,10}$/.test(doc)) {
+      if (!docOccurrences.has(doc)) {
+        docOccurrences.set(doc, []);
+      }
+      docOccurrences.get(doc).push({ emp, idx });
+    }
+  });
+
+  const validEmployeeDocs = new Set();
+
+  for (const [doc, entries] of docOccurrences.entries()) {
+    validEmployeeDocs.add(doc);
+    if (entries.length > 1) {
+      const firstEmp = entries[0].emp;
+      const allFieldsMatch = entries.every(({ emp }) =>
+        areEmployeeRowsExactMatch(firstEmp, emp)
+      );
+
+      entries.forEach(({ emp, idx }) => {
+        blocks.empleados.warnings.push({
+          file: emp._sourceFile || blocks.empleados.fileName,
+          block: blocks.empleados.label,
+          row: emp._sourceRow || idx + 2,
+          rowIndex: idx,
+          field: 'documento',
+          value: doc,
+          reason: allFieldsMatch
+            ? `Registro idéntico: la cédula ${doc} y todos sus demás campos coinciden exactamente (${entries.length} filas).`
+            : `Cédula duplicada: el documento ${doc} aparece ${entries.length} veces con datos distintos.`,
+          isDuplicateDoc: true,
+          isExactDuplicate: allFieldsMatch,
+          duplicateDoc: doc,
+        });
+      });
+    }
+  }
+
+  for (const b of KRU_BLOCKS) {
+    if (b.id === 'empleados') continue;
+    const blockData = blocks[b.id];
+    if (blockData.rows.length === 0) continue;
+
+    blockData.warnings = blockData.warnings.filter((w) => !w.isUnlinkedDoc);
+
+    blockData.rows.forEach((row, idx) => {
+      const doc = row.documento;
+      if (doc && blocks.empleados.rows.length > 0 && !validEmployeeDocs.has(doc)) {
+        blockData.warnings.push({
+          file: row._sourceFile || blockData.fileName,
+          block: blockData.label,
+          row: row._sourceRow || idx + 2,
+          rowIndex: idx,
+          field: 'documento',
+          value: doc,
+          reason: `El documento ${doc} no existe o no está relacionado con ningún empleado actual`,
+          isUnlinkedDoc: true,
+        });
+      }
+    });
+  }
+}
+
 export function computeBlockStatus(blockData) {
   if (!blockData || blockData.sourceFiles.length === 0 || blockData.rows.length === 0) {
     return 'FALTANTE';
@@ -336,33 +419,7 @@ export async function processCsvBatch(fileList) {
     );
   }
 
-  const validEmployeeDocs = new Set(
-    blocks.empleados.rows
-      .map((emp) => emp.documento)
-      .filter((doc) => doc && /^[VE]\d{5,10}$/.test(doc))
-  );
-
-  for (const b of KRU_BLOCKS) {
-    if (b.id === 'empleados') continue;
-    const blockData = blocks[b.id];
-    if (blockData.rows.length === 0) continue;
-
-    blockData.rows.forEach((row, idx) => {
-      const doc = row.documento;
-      if (doc && blocks.empleados.rows.length > 0 && !validEmployeeDocs.has(doc)) {
-        blockData.warnings.push({
-          file: row._sourceFile || blockData.fileName,
-          block: blockData.label,
-          row: row._sourceRow || idx + 2,
-          rowIndex: idx,
-          field: 'documento',
-          value: doc,
-          reason: `El documento ${doc} no existe o no está relacionado con ningún empleado actual`,
-          isUnlinkedDoc: true,
-        });
-      }
-    });
-  }
+  applyCrossRowValidations(blocks);
 
   let totalRows = 0;
   let errorCount = 0;

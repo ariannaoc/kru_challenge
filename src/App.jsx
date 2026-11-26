@@ -19,6 +19,8 @@ import { KRU_BLOCKS, KRU_SCHEMAS } from './etl/schema';
 import {
   processCsvBatch,
   validateAndNormalizeRow,
+  applyCrossRowValidations,
+  areEmployeeRowsExactMatch,
   computeBlockStatus,
 } from './etl/processor';
 import { exportCleanedBatchZip } from './etl/exporter';
@@ -74,7 +76,7 @@ export default function App() {
         setActiveBlockId(firstLoaded.id);
       }
     } catch (error) {
-      console.error('Error procesando CSV:', error);
+      console.error('Error procesando lote CSV:', error);
       alert('Ocurrió un error al leer los archivos CSV.');
     } finally {
       setIsProcessing(false);
@@ -137,44 +139,7 @@ export default function App() {
       warnings: newWarnings,
     };
 
-    const validEmployeeDocs = new Set(
-      updatedBlocks.empleados.rows
-        .map((emp) => emp.documento)
-        .filter((doc) => doc && /^[VE]\d{5,10}$/.test(doc))
-    );
-
-    for (const b of KRU_BLOCKS) {
-      if (b.id === 'empleados') continue;
-      const blk = updatedBlocks[b.id];
-      if (blk.rows.length === 0) continue;
-
-      const otherWarnings = blk.warnings.filter((w) => !w.isUnlinkedDoc);
-
-      blk.rows.forEach((row, idx) => {
-        const doc = row.documento;
-        if (
-          doc &&
-          updatedBlocks.empleados.rows.length > 0 &&
-          !validEmployeeDocs.has(doc)
-        ) {
-          otherWarnings.push({
-            file: row._sourceFile || blk.fileName,
-            block: blk.label,
-            row: row._sourceRow || idx + 2,
-            rowIndex: idx,
-            field: 'documento',
-            value: doc,
-            reason: `El documento ${doc} no existe o no está relacionado con ningún empleado actual`,
-            isUnlinkedDoc: true,
-          });
-        }
-      });
-
-      updatedBlocks[b.id] = {
-        ...blk,
-        warnings: otherWarnings,
-      };
-    }
+    applyCrossRowValidations(updatedBlocks);
 
     let totalRows = 0;
     let errorCount = 0;
@@ -197,6 +162,25 @@ export default function App() {
         warningCount,
       },
     };
+  };
+
+  const handleMergeDuplicateEmployees = (duplicateDoc) => {
+    setBatchData((prev) => {
+      if (!prev) return prev;
+      const empRows = prev.blocks.empleados.rows;
+      let firstMatchedRow = null;
+
+      const deduplicatedRows = empRows.filter((row) => {
+        if (row.documento !== duplicateDoc) return true;
+        if (!firstMatchedRow) {
+          firstMatchedRow = row;
+          return true;
+        }
+        return !areEmployeeRowsExactMatch(firstMatchedRow, row);
+      });
+
+      return revalidateBlockState(prev, 'empleados', deduplicatedRows);
+    });
   };
 
   const handleCellChange = (blockId, rowIndex, fieldKey, newValue, immediateValidate = false) => {
@@ -228,6 +212,13 @@ export default function App() {
 
   const handleCellBlur = (blockId) => {
     setBatchData((prev) => (prev ? revalidateBlockState(prev, blockId) : prev));
+  };
+
+  const handleExportZip = () => {
+    if (!batchData) return;
+    const finalizedBatch = revalidateBlockState(batchData, activeBlockId);
+    setBatchData(finalizedBatch);
+    exportCleanedBatchZip(finalizedBatch);
   };
 
   const getOptionsForColumn = (blockId, col) => {
@@ -333,6 +324,10 @@ export default function App() {
 
   const errorCellKeys = new Set(
     (currentBlockData?.errors || []).map((err) => `${err.rowIndex}-${err.field}`)
+  );
+
+  const warningCellKeys = new Set(
+    (currentBlockData?.warnings || []).map((warn) => `${warn.rowIndex}-${warn.field}`)
   );
 
   const indexedFilteredRows = (currentBlockData?.rows || [])
@@ -456,7 +451,7 @@ export default function App() {
                   className="w-full py-2.5 px-4 bg-blue-800 hover:bg-blue-900 disabled:bg-blue-400 text-white text-sm font-medium rounded-lg shadow-sm flex items-center justify-center gap-2 transition-colors cursor-pointer"
                 >
                   <Play className="h-4 w-4" />
-                  {isProcessing ? 'Normalizando datos...' : 'Procesar y normalizar archivos'}
+                  {isProcessing ? 'Normalizando datos...' : 'Procesar y normalizar lote'}
                 </button>
               </div>
             )}
@@ -481,7 +476,7 @@ export default function App() {
                 Nuevo cliente
               </button>
               <button
-                onClick={() => exportCleanedBatchZip(batchData)}
+                onClick={handleExportZip}
                 className="inline-flex items-center gap-1.5 px-4 py-2 text-xs font-medium text-white bg-blue-800 rounded-lg hover:bg-blue-900 shadow-sm transition-colors cursor-pointer"
               >
                 <Download className="h-3.5 w-3.5" />
@@ -587,7 +582,7 @@ export default function App() {
                     {currentSchema.label}
                   </h3>
                   <p className="text-xs text-slate-500">
-                  Corrige los datos directamente en la tabla o usa &ldquo;Aplicar a todos&rdquo; para completar columnas.
+                    Haz clic en cualquier celda para editar, o asigna valores en lote desde los encabezados
                   </p>
                 </div>
 
@@ -736,6 +731,9 @@ export default function App() {
                               const hasCellError = errorCellKeys.has(
                                 `${originalIdx}-${col.key}`
                               );
+                              const hasCellWarning = warningCellKeys.has(
+                                `${originalIdx}-${col.key}`
+                              );
                               const isHighlighted = highlightedCell === cellKey;
                               const isSelectCol = SELECT_TYPES.has(col.type);
                               const currentVal = row[col.key] ?? '';
@@ -765,6 +763,8 @@ export default function App() {
                                           ? 'ring-2 ring-blue-600 bg-blue-50 border-blue-600'
                                           : hasCellError
                                           ? 'bg-rose-50 border-rose-400 text-rose-900 focus:border-rose-600'
+                                          : hasCellWarning
+                                          ? 'bg-amber-50 border-amber-400 text-amber-950 focus:border-amber-600'
                                           : 'border-transparent hover:border-slate-300 focus:border-blue-600 focus:bg-white bg-transparent'
                                       }`}
                                     >
@@ -805,6 +805,8 @@ export default function App() {
                                         ? 'ring-2 ring-blue-600 bg-blue-50 border-blue-600'
                                         : hasCellError
                                         ? 'bg-rose-50 border-rose-400 text-rose-900 focus:border-rose-600'
+                                        : hasCellWarning
+                                        ? 'bg-amber-50 border-amber-400 text-amber-950 focus:border-amber-600'
                                         : 'border-transparent hover:border-slate-300 focus:border-blue-600 focus:bg-white bg-transparent'
                                     }`}
                                   />
@@ -892,11 +894,14 @@ export default function App() {
                 {currentBlockData?.warnings?.length > 0 ? (
                   <ul className="space-y-2 max-h-60 overflow-y-auto pr-1">
                     {currentBlockData.warnings.map((warn, i) => (
-                      <li key={i}>
+                      <li
+                        key={i}
+                        className="rounded-lg bg-amber-50 border border-amber-200 text-xs text-amber-900 overflow-hidden"
+                      >
                         <button
                           type="button"
                           onClick={() => jumpToCell(warn.rowIndex, warn.field)}
-                          className="w-full text-left p-2.5 rounded-lg bg-amber-50 hover:bg-amber-100/80 border border-amber-200 text-xs text-amber-900 transition-colors cursor-pointer group"
+                          className="w-full text-left p-2.5 hover:bg-amber-100/80 transition-colors cursor-pointer group"
                         >
                           <div className="font-semibold flex items-center justify-between">
                             <span>
@@ -911,6 +916,20 @@ export default function App() {
                           )}
                           <div className="text-amber-700 mt-0.5">{warn.reason}</div>
                         </button>
+
+                        {warn.isExactDuplicate && (
+                          <div className="px-2.5 pb-2.5 pt-0.5">
+                            <button
+                              type="button"
+                              onClick={() =>
+                                handleMergeDuplicateEmployees(warn.duplicateDoc)
+                              }
+                              className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded bg-amber-600 hover:bg-amber-700 text-white text-[11px] font-medium shadow-xs transition-colors cursor-pointer"
+                            >
+                              Mezclar registros idénticos
+                            </button>
+                          </div>
+                        )}
                       </li>
                     ))}
                   </ul>
